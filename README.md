@@ -1,134 +1,234 @@
-# Parcial Final - Programación N-Capas: Sistema de Pedidos de Restaurante
+# Sistema de Pedidos de Restaurante — API (N-Capas + Seguridad)
 
-## Parte 2 (50% Global del Parcial)
+API REST para una **cadena de restaurantes con varias sucursales**, donde distintos
+usuarios (administradores, encargados de turno y clientes) gestionan mesas y pedidos.
+Desarrollada con **Spring Boot 4 / Java 21**, arquitectura **N-Capas**, autenticación
+**JWT (access + refresh)**, autorización por **roles** y una **regla de negocio no
+trivial de autorización por sucursal**.
 
-- **Unidad:** Seguridad (Autenticación, Autorización, JWT, Roles, Docker, GitHub Actions CI/CD)
-- **Uso de Inteligencia Artificial:** Permitido y obligatorio como parte de la evaluación
-
----
-
-## Introducción
-
-Para el parcial final deberan crear una API para un **sistema de pedidos de restaurante**. No busco que memoricen sintaxis de JWT ni que me repitan un tutorial: quiero ver que son capaces de usar IA como una herramienta de trabajo real, entendiendo y defendiendo por escrito cada decisión de seguridad que tomaron, tal como lo harían en un entorno profesional.
-
-Van a poder apoyarse en ChatGPT, Claude, Copilot o la herramienta que prefieran durante todo el desarrollo. Lo que voy a calificar no es si "les salió", sino si entienden lo que la IA les generó, si lo adaptaron correctamente al caso de negocio que les planteo, y si pueden demostrarlo con evidencia.
+> La consigna original del parcial está en [`docs/CONSIGNA.md`](docs/CONSIGNA.md).
+> La bitácora de IA está en [`PROMPTS.md`](PROMPTS.md) y la reflexión en [`REFLEXION.md`](REFLEXION.md).
 
 ---
 
-## 1. Sistema de Pedidos de Restaurante
+## 1. Arquitectura N-Capas
 
-Desarrollar un proyecto backend de un sistema donde distintos usuarios interactúan con las mesas y los pedidos de una cadena de restaurantes con varias sucursales.
+El proyecto separa responsabilidades en capas, tal como se vio en clase:
 
-Entidades mínimas:
+| Capa | Paquete | Responsabilidad |
+|---|---|---|
+| **Presentación** | `web.controller`, `web.dto`, `web.GlobalExceptionHandler` | Exponer endpoints REST, validar la entrada y mapear excepciones a HTTP. No contiene reglas de negocio. |
+| **Lógica de Negocio** | `service` | Reglas del dominio: cálculo de totales, autorización por sucursal (regla B), gestión de tokens. |
+| **Acceso a Datos** | `repository`, `domain` | Entidades JPA y repositorios Spring Data (Hibernate ↔ PostgreSQL). |
+| **Seguridad (transversal)** | `security`, `config` | Filtro JWT, `SecurityFilterChain`, codificación de contraseñas, configuración. |
 
-- **Restaurante/Sucursal** (el sistema maneja más de una sucursal)
-- **Mesa** (pertenece a una sucursal, tiene capacidad y estado)
-- **Pedido/Orden** (asociado a un cliente, una mesa y una lista de productos)
-- **Usuario** (con rol asignado)
+```
+Cliente HTTP
+    │
+    ▼
+[web.controller]  ← DTOs + validación + @PreAuthorize (rol)
+    │
+    ▼
+[service]         ← reglas de negocio + REGLA B (sucursal)
+    │
+    ▼
+[repository]      ← Spring Data JPA
+    │
+    ▼
+[domain]  ⇄  PostgreSQL
+```
 
-Quiero que la arquitectura respete el enfoque N-Capas que hemos visto en clase (Presentación / Lógica de Negocio / Acceso a Datos, como mínimo).
+El flujo de una petición autenticada atraviesa además el filtro
+`security.JwtAuthenticationFilter`, que valida el Access Token antes de llegar al controller.
 
 ---
 
-## 2. Requisitos Técnicos
+## 2. Cómo levantar el proyecto con Docker
 
-### 2.1 Autenticación
+**Requisito único:** Docker + Docker Compose.
 
-- Login con usuario y contraseña, que devuelva un **Access Token (JWT)** y un **Refresh Token**.
-- El Access Token debe expirar en un tiempo corto (por ejemplo, 15 minutos) y el Refresh Token en un tiempo mayor (por ejemplo, 7 días).
-- Endpoint para renovar el Access Token usando el Refresh Token.
+```bash
+# 1. (Opcional) copiar variables de entorno y ajustarlas
+cp .env.example .env
 
-### 2.2 Roles y Autorización
+# 2. Levantar API + base de datos
+docker-compose up --build
+```
 
-Mínimo estos tres roles, con permisos claramente diferenciados:
+Esto arranca:
+
+- **`db`** — PostgreSQL 16 (puerto `5432`).
+- **`api`** — la API en `http://localhost:8080` (espera a que la BD esté saludable).
+
+Al iniciar por primera vez, se cargan datos de ejemplo (sucursales, usuarios de cada
+rol y productos) mediante `config.DataInitializer`.
+
+Para detener: `Ctrl+C` y luego `docker-compose down` (agregar `-v` para borrar la BD).
+
+### Variables de entorno principales
+
+| Variable | Descripción | Default |
+|---|---|---|
+| `APP_JWT_SECRET` | Secreto HMAC para firmar los JWT (≥ 32 bytes) | valor dev inseguro |
+| `APP_JWT_ACCESS_MINUTES` | Expiración del Access Token | `15` |
+| `APP_JWT_REFRESH_DAYS` | Expiración del Refresh Token | `7` |
+| `POSTGRES_PASSWORD` | Contraseña de PostgreSQL | `restaurante` |
+| `APP_SEED_ADMIN_PASSWORD` | Contraseña del admin inicial | `Admin123!` |
+
+> En producción, el secreto JWT y las contraseñas **nunca** se hardcodean: se
+> inyectan por variables de entorno / gestor de secretos.
+
+---
+
+## 3. Roles y permisos
 
 | Rol | Permisos |
 |---|---|
-| Administrador | Acceso total: gestiona restaurantes, mesas, usuarios y pedidos de todas las sucursales |
-| Encargado de turno | Gestiona pedidos y mesas, pero **únicamente de la sucursal a la que pertenece** |
-| Cliente | Solo puede crear, ver y cancelar sus propios pedidos |
+| **ADMINISTRADOR** | Acceso total: gestiona restaurantes, mesas, usuarios y pedidos de **todas** las sucursales. |
+| **ENCARGADO** | Gestiona pedidos y mesas **únicamente de la sucursal a la que pertenece** (regla B). |
+| **CLIENTE** | Solo crea, ve y cancela **sus propios** pedidos. |
 
-### 2.3 Regla de negocio no trivial (obligatoria)
+El control por rol se hace con `@PreAuthorize` en los controllers; el control fino por
+sucursal se hace en la capa de negocio (ver siguiente sección).
 
-Además de la autorización básica por rol, deberan implementar **una** de estas reglas (o me propongan una equivalente):
+### Usuarios de ejemplo (seed)
 
-- **Opción A — Invalidación de tokens por cambio de contraseña:** si un usuario cambia su contraseña, todos los tokens emitidos previamente deben quedar inválidos de inmediato, aunque no hayan expirado. Quiero que me expliquen y justifiquen el mecanismo elegido (versión de token, blacklist, etc.).
-- **Opción B — Autorización por atributo, no solo por rol:** un Encargado de turno solo puede confirmar, modificar o cancelar pedidos de **su propia sucursal**. Esto no se resuelve solo verificando el rol; requiere lógica adicional que compare la sucursal del usuario autenticado contra la sucursal de la mesa/pedido.
-- **Opción C — Expiración forzada por inactividad:** si un Encargado de turno no realiza ninguna petición autenticada durante X minutos, su sesión (refresh token) debe invalidarse automáticamente, incluso si el token aún no expiró.
-
-### 2.4 Docker
-
-- `Dockerfile` funcional para la API.
-- `docker-compose.yml` que levante la API junto con su base de datos.
-- Se debera levantar el proyecto con (`docker-compose up`).
-
-### 2.5 CI/CD con GitHub Actions
-
-Realizar un pipeline de CI/CD de GitHub Actions, como mínimo:
-
-- Se ejecute automáticamente en cada `push` a la rama principal.
-- Compile/construya el proyecto.
-- Ejecute las pruebas, si existen.
-- Falle si se detecta una vulnerabilidad crítica o un secreto expuesto.
+| Usuario | Contraseña | Rol | Sucursal |
+|---|---|---|---|
+| `admin` | `Admin123!` | ADMINISTRADOR | — |
+| `encargado.centro` | `Encargado123!` | ENCARGADO | Sucursal Centro |
+| `encargado.norte` | `Encargado123!` | ENCARGADO | Sucursal Norte |
+| `cliente` | `Cliente123!` | CLIENTE | — |
 
 ---
 
-## 3. Evidencia de uso de IA
+## 4. Regla de negocio no trivial — Opción B: Autorización por sucursal
 
-Como se hara uso de IA durante el desarrollo, necesito ver el proceso, no solo el resultado. Estos entregables son tan importantes como el código en sí, y así los voy a calificar.
+> **Un Encargado de turno solo puede confirmar, modificar o cancelar pedidos (y gestionar
+> mesas) de su propia sucursal.**
 
-### 3.1 Repositorio en GitHub
+Esto **no** se resuelve solo con el rol: dos encargados tienen el mismo rol `ENCARGADO`
+pero distinta sucursal. La autorización compara un **atributo del usuario autenticado**
+(su `sucursalId`, que viaja dentro del JWT) contra un **atributo del recurso** (la
+`sucursalId` del pedido/mesa).
 
-Quiero un historial de commits real e incremental, no un solo commit de "Parcial final". Cada mensaje de commit debe explicar el cambio y, cuando aplique, por qué corrigieron algo que generó la IA. Por ejemplo: `fix: la IA generó autorización solo por rol; se agregó validación de sucursal en el middleware`.
+**Dónde vive la regla:** `service.SucursalAccessGuard#verificarGestionSucursal(...)`,
+invocada desde `PedidoService` y `MesaService`.
 
-### 3.2 Archivo `PROMPTS.md`
+```java
+if (role == Role.ENCARGADO) {
+    Long sucursalActor = actor.getSucursalId();          // atributo del usuario
+    if (sucursalActor == null || !sucursalActor.equals(sucursalIdRecurso)) { // vs recurso
+        throw new ForbiddenOperationException(...);      // -> HTTP 403
+    }
+}
+```
 
-Una bitácora de todos los prompts relevantes que usaron, indicando:
+Detalles de diseño:
 
-1. Herramienta de IA usada (ChatGPT, Claude, Copilot, etc.).
-2. El prompt exacto (o un resumen fiel si fue muy largo).
-3. Qué generó la IA (resumen).
-4. Qué tuvieron que corregir, rechazar o completar manualmente, y por qué.
+- La `sucursalId` se firma dentro del Access Token, así el chequeo no depende de datos
+  manipulables por el cliente.
+- El `Pedido` **denormaliza** su sucursal desde la mesa al crearse, de modo que la
+  comparación es siempre directa y estable.
+- El listado de pedidos/mesas también se filtra por sucursal, para que un encargado ni
+  siquiera *vea* recursos de otra sucursal.
 
-### 3.3 Documento de reflexión (`REFLEXION.md`)
+### Demostración rápida de la regla
 
-Quiero que me respondan con sus propias palabras:
+```bash
+# El encargado de la Sucursal Norte se autentica...
+TOKEN_NORTE=$(curl -s -X POST localhost:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"encargado.norte","password":"Encargado123!"}' | jq -r .accessToken)
 
-1. ¿Qué partes generó bien la IA sin necesidad de corrección?
-2. ¿Qué errores o decisiones incorrectas tomó la IA, especialmente en temas de seguridad?
-3. ¿Cómo detectaron esos errores y cómo los corrigieron?
-4. Si tuvieran que explicarle a un compañero cómo funciona el mecanismo de autorización por sucursal (o la regla de negocio que eligieron), ¿qué le dirían?
-
-### 3.4 `README.md` del proyecto
-
-- Instrucciones claras para levantar el proyecto con Docker.
-- Explicación breve de las capas de la arquitectura.
-- Explicación de los roles y de la regla de negocio implementada.
-
----
-
-## 4. Rubrica
-
-| Componente | Peso |
-|---|---|
-| Funcionalidad técnica (JWT, roles, Docker, CI/CD operativos) | 30% |
-| Implementación correcta de la regla de negocio no trivial | 20% |
-| Bitácora de prompts (`PROMPTS.md`) y calidad del proceso documentado | 30% |
-| Documento de reflexión (`REFLEXION.md`) | 10% |
-| Historial de commits (evidencia de proceso e iteración) | 10% |
-| **Total** | **100%** |
-
----
-
-## 5. Penalizaciones
-
-- Un solo commit, o commits sin mensajes descriptivos.
-- Un `PROMPTS.md` genérico, incompleto, o que no coincide con el código que entregaron.
-- Código funcional pero sin capacidad de explicar decisiones clave en la parte teórica; eso me indica que no hubo comprensión real del trabajo de la IA.
-- La regla de negocio no implementada, o implementada de forma genérica e incorrecta.
+# ...e intenta cambiar el estado de un pedido de la Sucursal Centro (id 1) -> 403 Forbidden
+curl -i -X PATCH localhost:8080/api/pedidos/1/estado \
+  -H "Authorization: Bearer $TOKEN_NORTE" \
+  -H 'Content-Type: application/json' \
+  -d '{"estado":"CONFIRMADO"}'
+```
 
 ---
 
-## 6. Para Cerrar
+## 5. Autenticación JWT
 
-No quiero medir si son capaces de escribir JWT de memoria. Quiero ver si son capaces de usar IA de forma crítica y responsable en un contexto de seguridad, donde los errores tienen consecuencias reales. Usen la IA, pero verifiquen, cuestionen y entiendan todo lo que les entregue.
+- **Login** (`POST /api/auth/login`) devuelve `accessToken` + `refreshToken`.
+- **Access Token**: JWT firmado (HS256), *stateless*, expira en **15 min**. Lleva
+  `sub`, `uid`, `role` y `sucursalId`.
+- **Refresh Token**: opaco (UUID), **persistido en BD**, expira en **7 días**. Al
+  persistirlo se puede **revocar** antes de tiempo (logout, rotación, cambio de contraseña).
+- **Refresh** (`POST /api/auth/refresh`) valida el refresh token, lo **rota** (revoca el
+  anterior y emite uno nuevo) y devuelve un nuevo Access Token.
+- Las contraseñas se almacenan con **BCrypt**; nunca en texto plano.
+
+### Ejemplo de flujo
+
+```bash
+# Login
+curl -s -X POST localhost:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"cliente","password":"Cliente123!"}'
+
+# Usar el access token
+curl localhost:8080/api/pedidos -H "Authorization: Bearer <ACCESS_TOKEN>"
+
+# Renovar el access token
+curl -X POST localhost:8080/api/auth/refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"refreshToken":"<REFRESH_TOKEN>"}'
+```
+
+---
+
+## 6. Endpoints principales
+
+| Método | Ruta | Rol requerido | Descripción |
+|---|---|---|---|
+| POST | `/api/auth/login` | público | Login (access + refresh) |
+| POST | `/api/auth/refresh` | público | Renovar access token |
+| POST | `/api/auth/register` | público | Registro de cliente |
+| POST | `/api/auth/change-password` | autenticado | Cambiar contraseña (revoca sesiones) |
+| GET/POST/PUT/DELETE | `/api/sucursales` | ADMIN (escritura) | CRUD de sucursales |
+| GET/POST/PUT/DELETE | `/api/productos` | ADMIN (escritura) | CRUD del menú |
+| GET | `/api/mesas` | autenticado | Listar mesas (filtrado por sucursal si es encargado) |
+| POST | `/api/mesas` | ADMIN, ENCARGADO | Crear mesa (regla B) |
+| PATCH | `/api/mesas/{id}/estado` | ADMIN, ENCARGADO | Cambiar estado (regla B) |
+| GET/POST | `/api/usuarios` | ADMIN | Gestión de usuarios |
+| POST | `/api/pedidos` | autenticado | Crear pedido |
+| GET | `/api/pedidos` | autenticado | Listar (filtrado por rol/sucursal/dueño) |
+| PATCH | `/api/pedidos/{id}/estado` | ADMIN, ENCARGADO | Cambiar estado (regla B) |
+| PATCH | `/api/pedidos/{id}/cancelar` | autenticado | Cancelar (cliente: propio; encargado: su sucursal) |
+
+Respuestas de error uniformes en JSON: `401` (sin token), `403` (sin permisos / regla B),
+`400` (validación/negocio), `404` (no encontrado).
+
+---
+
+## 7. CI/CD (GitHub Actions)
+
+El workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) corre en cada `push` a
+`main` y en cada PR:
+
+1. **Build & Test** — compila y ejecuta las pruebas con `./gradlew build`.
+2. **Secret Scan** — `gitleaks` falla si detecta un secreto expuesto.
+3. **Vulnerability Scan** — `Trivy` falla si detecta una vulnerabilidad **CRITICAL**.
+
+---
+
+## 8. Pruebas
+
+```bash
+./gradlew test
+```
+
+Incluye un test unitario de la regla B
+(`SucursalAccessGuardTest`) y la carga de contexto de Spring (con H2 en memoria).
+
+---
+
+## 9. Stack técnico
+
+- Java 21, Spring Boot 4.1, Spring Security 7, Spring Data JPA (Hibernate 7)
+- PostgreSQL 16 (H2 en pruebas)
+- JJWT 0.12 para los tokens
+- Gradle 9, Docker / Docker Compose
