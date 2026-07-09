@@ -1,0 +1,14 @@
+.git
+.github
+.gradle
+build
+bin
+out
+*.iml
+.idea
+.vscode
+HELP.md
+README.md
+PROMPTS.md
+REFLEXION.md
+.env

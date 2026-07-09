@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: restaurante-db
+    environment:
+      POSTGRES_DB: restaurante
+      POSTGRES_USER: restaurante
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-restaurante}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U restaurante -d restaurante"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    container_name: restaurante-api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/restaurante
+      SPRING_DATASOURCE_USERNAME: restaurante
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-restaurante}
+      # En un entorno real, estos secretos vienen de un gestor de secretos, no del compose.
+      APP_JWT_SECRET: ${APP_JWT_SECRET:-dev-only-insecure-secret-change-me-please-min-32-bytes}
+      APP_JWT_ACCESS_MINUTES: ${APP_JWT_ACCESS_MINUTES:-15}
+      APP_JWT_REFRESH_DAYS: ${APP_JWT_REFRESH_DAYS:-7}
+      APP_SEED_ADMIN_USERNAME: ${APP_SEED_ADMIN_USERNAME:-admin}
+      APP_SEED_ADMIN_PASSWORD: ${APP_SEED_ADMIN_PASSWORD:-Admin123!}
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
