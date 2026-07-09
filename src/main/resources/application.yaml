@@ -1,3 +1,37 @@
 spring:
   application:
     name: pnc-parcial-final-restaurante
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/restaurante}
+    username: ${SPRING_DATASOURCE_USERNAME:restaurante}
+    password: ${SPRING_DATASOURCE_PASSWORD:restaurante}
+  jpa:
+    hibernate:
+      # 'update' es cómodo para el parcial; en producción se usarían migraciones.
+      ddl-auto: update
+    open-in-view: false
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+  jackson:
+    default-property-inclusion: non_null
+
+app:
+  jwt:
+    # NUNCA se hardcodea el secreto real: se inyecta por variable de entorno.
+    # Este valor por defecto es SOLO para desarrollo local y debe reemplazarse.
+    secret: ${APP_JWT_SECRET:dev-only-insecure-secret-change-me-please-min-32-bytes}
+    access-expiration-minutes: ${APP_JWT_ACCESS_MINUTES:15}
+    refresh-expiration-days: ${APP_JWT_REFRESH_DAYS:7}
+
+  # Credenciales del admin inicial (seed). Sobrescribir por entorno.
+  seed:
+    admin-username: ${APP_SEED_ADMIN_USERNAME:admin}
+    admin-password: ${APP_SEED_ADMIN_PASSWORD:Admin123!}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
